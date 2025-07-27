@@ -1,0 +1,38 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    base64 (0.3.0)
+    date (3.4.1)
+    dotenv (2.8.1)
+    fileutils (1.7.3)
+    json (2.13.1)
+    logger (1.7.0)
+    rexml (3.4.1)
+    rubyzip (2.4.1)
+    selenium-webdriver (4.34.0)
+      base64 (~> 0.2)
+      logger (~> 1.4)
+      rexml (~> 3.2, >= 3.2.5)
+      rubyzip (>= 1.2.2, < 3.0)
+      websocket (~> 1.0)
+    websocket (1.2.11)
+
+PLATFORMS
+  aarch64-linux-gnu
+  aarch64-linux-musl
+  arm-linux-gnu
+  arm-linux-musl
+  arm64-darwin
+  x86_64-darwin
+  x86_64-linux-gnu
+  x86_64-linux-musl
+
+DEPENDENCIES
+  date
+  dotenv (~> 2.8)
+  fileutils
+  json
+  selenium-webdriver (~> 4.16)
+
+BUNDLED WITH
+   2.7.1
