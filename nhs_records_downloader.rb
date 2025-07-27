@@ -47,23 +47,12 @@ class NHSRecordsDownloader
     stdout, stderr, status = Open3.capture3("op whoami #{account_flag}")
     
     if !status.success?
-      puts "1Password session expired, signing in..."
-      
-      # Try to sign in automatically
-      signin_cmd = "op signin #{account_flag} --raw"
-      stdout, stderr, status = Open3.capture3(signin_cmd)
-      
-      if status.success?
-        # Export the session token
-        ENV['OP_SESSION_' + (account || 'my').gsub('.', '_')] = stdout.strip
-        puts "✓ Successfully signed in to 1Password"
-      else
-        puts "❌ Failed to sign in to 1Password"
-        puts "Error: #{stderr}"
-        puts "\nPlease run manually:"
-        puts "eval $(op signin#{account ? ' --account ' + account : ''})"
-        exit 1
-      end
+      puts "❌ 1Password CLI is not signed in"
+      puts "\n📝 To sign in to 1Password, run this command in your terminal:"
+      puts "\n   eval $(op signin#{account ? ' --account ' + account : ''})"
+      puts "\nThen run this script again."
+      puts "\n💡 Tip: 1Password CLI sessions expire after 30 minutes of inactivity."
+      exit 1
     end
     
     # Try to get NHS login item

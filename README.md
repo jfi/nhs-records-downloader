@@ -56,8 +56,15 @@ A Ruby script to securely download your NHS GP records, documents, and test resu
    ```bash
    eval $(op signin)
    ```
+   
+   Note: The script will prompt you to run this command if your 1Password session has expired.
 
-3. Run the setup script or manually create `.env`:
+3. Either run the setup script:
+   ```bash
+   ruby setup.rb
+   ```
+   
+   Or manually create `.env`:
    ```
    ONEPASSWORD_NHS_ITEM=NHS
    NHS_NUMBER=XXX XXX XXXX
@@ -117,6 +124,22 @@ Debug mode with verbose output:
 ./nhs_records_downloader.rb -s test -v
 ```
 
+### Download Location and Formats
+
+All files are downloaded to the `nhs_downloads/` directory in the project folder:
+
+```
+nhs-records/
+└── nhs_downloads/
+    ├── documents/           # PDF files and embedded images
+    ├── consultations_and_events.json
+    ├── consultations_and_events.csv
+    ├── test_results.json
+    ├── test_results.csv
+    ├── download_history.json
+    └── skipped_documents_report.txt
+```
+
 ### What the script downloads
 
 The script will:
@@ -129,24 +152,28 @@ The script will:
 - Download records to `nhs_downloads/`
 
 #### Documents
-- PDF letters and documents
-- Embedded images
-- Creates a summary report of any documents that couldn't be downloaded
+- **Format**: PDF files
+- **Location**: `nhs_downloads/documents/`
+- PDF letters and documents from your GP records
+- Embedded images extracted from documents
+- Creates `skipped_documents_report.txt` for any documents that couldn't be downloaded
 
 #### Consultations and Events
+- **Formats**: JSON and CSV
+- **Files**: `consultations_and_events.json` and `consultations_and_events.csv`
 - All consultation records with dates, locations, and staff
-- Exports to both JSON and CSV formats
 - Includes entry types: medications, test results, problems, notes, etc.
 
 #### Test Results
+- **Formats**: JSON and CSV
+- **Files**: `test_results.json` and `test_results.csv`
 - All test results across all available years
 - Full test details including values, ranges, and clinical notes
-- Exports to both JSON and CSV formats
 
 ## Troubleshooting
 
 - **"cannot load such file -- selenium-webdriver"**: Run `bundle install` first
-- **"Please sign in to 1Password CLI"**: Run `eval $(op signin)`
+- **"1Password CLI is not signed in"**: Run `eval $(op signin)` in your terminal
 - **"Could not find 1Password item"**: Ensure your NHS login item exists in 1Password
 - **Login fails**: Check your credentials and try `./nhs_records_downloader.rb --test-login` to debug
 
