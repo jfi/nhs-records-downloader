@@ -304,16 +304,19 @@ class NHSRecordsDownloader
       puts "Trying alternate route..."
     end
     
-    # Click Continue to NHS login button
+    # The 'Access your NHS account' page now sits between the homepage and
+    # NHS login, with a Continue button that starts the auth redirect
     begin
-      continue_button = @wait.until { @driver.find_element(css: 'a.nhsuk-button--login[href*="auth/redirect"]') }
-      puts "Clicking 'Continue to NHS login' button..."
-      continue_button.click
+      continue_link = @wait.until do
+        @driver.find_element(css: 'a.nhsuk-button[href*="auth/redirect"], a[href*="auth/redirect"]')
+      end
+      puts "Clicking 'Continue' button on the Access your NHS account page..."
+      continue_link.click
       sleep(2)
     rescue
       # If we can't find the button, navigate directly
       puts "Navigating directly to login page..."
-      @driver.get('https://www.nhs.uk/auth/redirect?target=https://www.nhsapp.service.nhs.uk/patient')
+      @driver.get('https://www.nhs.uk/auth/redirect?referrer=nhsuk-patient')
       sleep(2)
     end
     
