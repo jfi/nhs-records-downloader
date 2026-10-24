@@ -101,6 +101,7 @@ Options:
   -v, --verbose             Enable verbose output for debugging
       --skip-details        Skip downloading individual test result details (faster)
       --test-login          Test login only (no downloads)
+      --dump-links          Log in, print the page links and exit (debugging)
   -h, --help               Show help message
 ```
 
@@ -197,6 +198,7 @@ The script will:
 - **"1Password CLI is not signed in"**: Run `eval $(op signin)` in your terminal
 - **"Could not find 1Password item"**: Ensure your NHS login item exists in 1Password
 - **"Passkey required"**: Finish the passkey prompt in the Chrome window (Touch ID, Windows Hello, phone or security key) and the script continues on its own. It waits 3 minutes before giving up; choosing "use your password instead" on that page also works.
+- **"Could not find ... link"**: The NHS App occasionally redesigns its home page. Run `./nhs_records_downloader.rb --dump-links` to print the links after login so the selectors can be updated.
 - **Login fails**: Check your credentials and try `./nhs_records_downloader.rb --test-login` to debug
 
 ## Features

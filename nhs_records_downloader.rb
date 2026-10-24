@@ -434,9 +434,25 @@ class NHSRecordsDownloader
       raise "Could not find email field"
     end
     
+    password_entered_with_email = false
+    
     begin
       puts "Entering email..."
       email_field.send_keys(email)
+      
+      # Newer NHS login puts the email and password on one page. Fill the
+      # password before submitting so the form is not rejected as empty and
+      # then submitted a second time.
+      begin
+        inline_password = @driver.find_element(id: 'password-input')
+        if inline_password.displayed?
+          puts "Password field found on the same page, entering password too..."
+          inline_password.send_keys(password)
+          password_entered_with_email = true
+        end
+      rescue Selenium::WebDriver::Error::NoSuchElementError
+        # Older two-step login, the password is entered on the next page
+      end
       
       # Look for submit/continue button
       sleep(2)
@@ -492,14 +508,18 @@ class NHSRecordsDownloader
         sleep(2)
       end
       
-      # Check if we're on password page
-      if @driver.current_url.include?('log-in-password') || 
-         page_has_element?(:id, 'password-input') || 
-         page_has_element?(:id, 'password')
+      # Check if we're on the password page. The combined login page also has
+      # a password field, so only submit again on the dedicated password page
+      # or when NHS says the password is missing.
+      if password_page_needs_entry?
         puts "Found password page!"
         enter_password(password)
         break
       end
+      
+      # The combined login page submitted both fields already, so stop
+      # waiting once it has moved on
+      break if password_entered_with_email && !@driver.current_url.include?('/login')
       
       # If we're still on email page, try clicking continue again
       if @driver.current_url.include?('enter-email')
@@ -519,7 +539,7 @@ class NHSRecordsDownloader
       sleep(2)
     end
     
-    if attempt >= max_attempts
+    if attempt >= max_attempts && !password_entered_with_email
       puts "Failed to reach password page after #{max_attempts} attempts"
       puts "Final URL: #{@driver.current_url}"
     end
@@ -784,6 +804,14 @@ class NHSRecordsDownloader
     puts "\n⚠️  Timed out waiting for the passkey step"
     puts "Current URL: #{@driver.current_url}"
     false
+  end
+
+  def password_page_needs_entry?
+    has_password_field = page_has_element?(:id, 'password-input') || page_has_element?(:id, 'password')
+    return false unless has_password_field
+
+    @driver.current_url.include?('log-in-password') ||
+      @driver.page_source.include?('Enter your password')
   end
 
   def authentication_state
@@ -1058,7 +1086,9 @@ class NHSRecordsDownloader
     if page_source.include?(nhs_number) || page_source.include?(nhs_number_no_spaces) || 
        page_source.include?("Good morning") || page_source.include?("Good afternoon") || 
        page_source.include?("Good evening") || page_source.include?("Services") ||
-       page_source.include?("Your health")
+       page_source.include?("Your health") ||
+       page_source.include?("Allergies and adverse reactions") ||
+       @driver.current_url.include?('nhsapp.service.nhs.uk/patient')
       puts "✓ Login successful!"
       puts "✓ Current URL: #{@driver.current_url}"
       
@@ -1121,11 +1151,33 @@ class NHSRecordsDownloader
     raise "OTP rate limit - 15 minute wait completed. Please run the script again."
   end
 
+  def on_records_page?
+    source = @driver.page_source
+    return true if source.include?('Your GP health record') || source.include?('NHS number:')
+
+    url = @driver.current_url
+    return true if url.include?('/patient/documents') ||
+                   url.include?('/patient/test-results') ||
+                   url.include?('health-records') ||
+                   url.include?('gp-medical-record')
+
+    # The newer home page replaces the GP health record tile with links to
+    # each section
+    page_has_element?(:link_text, 'Documents') && page_has_element?(:link_text, 'Test results')
+  end
+
   def navigate_to_gp_records
     puts "Navigating to GP records..."
     
     # Wait for page to be ready
     sleep(2)
+    
+    # Newer NHS App home pages link straight to the record sections, with no
+    # separate "GP health record" page to open first
+    if on_records_page?
+      puts "✓ Already on a records page: #{@driver.current_url}"
+      return true
+    end
     
     # Click on "GP health record" link
     begin
@@ -1149,6 +1201,11 @@ class NHSRecordsDownloader
           gp_record_link.click
           sleep(2)
         rescue => e
+          if on_records_page?
+            puts "✓ Already on a records page: #{@driver.current_url}"
+            return true
+          end
+
           puts "Could not find GP health record link: #{e.message}"
           puts "Current URL: #{@driver.current_url}"
           puts "Page source sample: #{@driver.page_source[0..500]}"
@@ -1200,17 +1257,81 @@ class NHSRecordsDownloader
     end
   end
 
+  SECTION_HUB_URL = 'https://www.nhsapp.service.nhs.uk/patient/health-records/gp-medical-record'
+
+  def visible_links
+    links = []
+    @driver.find_elements(css: 'a').each do |link|
+      begin
+        next unless link.displayed?
+
+        text = link.text.to_s.strip
+        next if text.empty?
+
+        links << [text, link.attribute('href')]
+      rescue Selenium::WebDriver::Error::WebDriverError
+        # Ignore stale elements
+      end
+    end
+    links
+  end
+
+  def find_section_link(section)
+    selectors = [
+      [:css, "li[data-purpose='#{section[:data_purpose]}'] a"],
+      [:css, "a[href*='#{section[:href]}']"],
+      [:xpath, "//a[.//span[contains(text(), '#{section[:name]}')]]"],
+      [:link_text, section[:name]]
+    ]
+
+    selectors.each do |method, locator|
+      begin
+        link = @driver.find_element(method, locator)
+        if link && link.displayed?
+          puts "Found #{section[:name]} link by #{method}"
+          return link
+        end
+      rescue Selenium::WebDriver::Error::WebDriverError
+        # Try the next selector
+      end
+    end
+
+    # Looser match for redesigned pages where link text is split across spans
+    begin
+      needle = section[:name].downcase
+      link = @driver.find_elements(css: 'a').find do |candidate|
+        candidate.displayed? && candidate.text.to_s.downcase.include?(needle)
+      end
+      return link if link
+    rescue Selenium::WebDriver::Error::WebDriverError
+      # No links available
+    end
+
+    nil
+  end
+
+  def dump_page_links
+    puts "\nCurrent URL: #{@driver.current_url}"
+    puts "Visible links:"
+    visible_links.each do |text, href|
+      puts "  #{text.inspect} -> #{href.inspect}"
+    end
+  end
+
   def download_records
     puts "Starting record downloads..."
     
     # Wait for page to fully load
     sleep(3)
     
+    # Remember where the section links live so we can come back after each one
+    records_url = @driver.current_url
+    
     # Define all available sections
     all_sections = [
       { name: "Documents", href: "documents", data_purpose: "documents" },
       { name: "Consultations and events", href: "events", data_purpose: "events" },
-      { name: "Test results", href: "test-results-v2", data_purpose: "test-results" }
+      { name: "Test results", href: "test-results", data_purpose: "test-results" }
     ]
     
     # Filter sections based on options
@@ -1236,45 +1357,23 @@ class NHSRecordsDownloader
       puts "="*50
       
       begin
-        # Click on the section link
-        section_link = nil
+        section_link = find_section_link(section)
         
-        # Try multiple methods to find the link
-        
-        # Method 1: By data-purpose attribute
-        begin
-          section_link = @driver.find_element(css: "li[data-purpose='#{section[:data_purpose]}'] a")
-          puts "Found link by data-purpose"
-        rescue
-          # Method 2: By href
+        # The redesigned home page omits some sections, but they still exist
+        # on the older GP health record page
+        if !section_link && !@driver.current_url.include?('gp-medical-record')
+          puts "Looking for #{section[:name]} on the GP health record page..."
           begin
-            section_link = @driver.find_element(css: "a[href*='#{section[:href]}']")
-            puts "Found link by href"
-          rescue
-            # Method 3: By link text in span
-            begin
-              section_link = @driver.find_element(xpath: "//a[.//span[contains(text(), '#{section[:name]}')]]")
-              puts "Found link by span text"
-            rescue
-              # Method 4: Simple text search
-              begin
-                section_link = @driver.find_element(link_text: section[:name])
-                puts "Found link by link text"
-              rescue => e
-                puts "Could not find link with any method"
-                puts "Current URL: #{@driver.current_url}"
-                # Debug: print available links
-                links = @driver.find_elements(css: "li[data-purpose] a")
-                puts "Available links found:"
-                links.each do |link|
-                  begin
-                    puts "  - #{link.text}"
-                  rescue
-                    # Ignore stale elements
-                  end
-                end
-              end
-            end
+            @driver.get(SECTION_HUB_URL)
+            sleep(2)
+            section_link = find_section_link(section)
+          rescue Selenium::WebDriver::Error::WebDriverError => e
+            puts "Could not open GP health record page: #{e.message}"
+          end
+
+          unless section_link
+            @driver.get(records_url)
+            sleep(1)
           end
         end
         
@@ -1295,19 +1394,13 @@ class NHSRecordsDownloader
             download_documents
           end
           
-          # Navigate back to main GP records page
-          puts "Navigating back to GP records page..."
-          # For test results, we need to navigate to the main page directly
-          # as we may be several pages deep after year navigation
-          if section[:name] == "Test results"
-            @driver.get('https://www.nhsapp.service.nhs.uk/patient/health-records/gp-medical-record')
-            sleep(3)
-          else
-            @driver.navigate.back
-            sleep(3)
-          end
+          # Navigate back to the page that lists the sections
+          puts "Returning to #{records_url}..."
+          @driver.get(records_url)
+          sleep(2)
         else
           puts "❌ Could not find #{section[:name]} link"
+          dump_page_links
         end
         
       rescue => e
@@ -1926,6 +2019,7 @@ class NHSRecordsDownloader
   def download_documents
     puts "Downloading documents..."
     index_existing_documents
+    documents_url = @driver.current_url
     
     begin
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -2048,7 +2142,7 @@ class NHSRecordsDownloader
             puts "Navigation lost, returning to documents section"
             # Try to get back to documents
             begin
-              @driver.get('https://www.nhsapp.service.nhs.uk/patient/health-records/gp-medical-record/documents')
+              @driver.get(documents_url)
               sleep(2)
             rescue
               puts "Failed to navigate back to documents"
@@ -2402,6 +2496,14 @@ class NHSRecordsDownloader
     begin
       login
       
+      # If debugging the page layout, dump the links and stop
+      if @options[:dump_links]
+        dump_page_links
+        puts "\nPress Enter to close the browser..."
+        gets
+        return
+      end
+      
       # If test login only, stop here
       if @options[:test_login]
         puts "\n✅ Login test completed successfully!"
@@ -2452,6 +2554,10 @@ if __FILE__ == $0
     
     opts.on("--test-login", "Test login only (no downloads)") do
       options[:test_login] = true
+    end
+    
+    opts.on("--dump-links", "Log in, print the links on the page, then exit (for debugging)") do
+      options[:dump_links] = true
     end
     
     opts.on("-h", "--help", "Show this help message") do
