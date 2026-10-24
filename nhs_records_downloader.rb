@@ -2119,6 +2119,20 @@ class NHSRecordsDownloader
     true
   end
 
+  def wait_for_on_demand_return(timeout = 30)
+    return unless @driver.current_url.include?('on-demand-gp-return')
+
+    puts "Waiting for the GP record to load..."
+    deadline = Time.now + timeout
+
+    while Time.now < deadline
+      return unless @driver.current_url.include?('on-demand-gp-return')
+      sleep(1)
+    end
+
+    puts "⚠️  Timed out waiting for the GP record to load"
+  end
+
   def open_gp_documents_if_needed
     target = '/patient/documents/your-documents'
     return if @driver.current_url.include?(target)
@@ -2127,16 +2141,18 @@ class NHSRecordsDownloader
     # level below it on redesigned versions of the app
     begin
       link = @driver.find_element(css: "a[href*='#{target}']")
-      return unless link.displayed?
-
-      puts "Opening 'Your documents'..."
-      link.click
-      sleep(2)
+      if link.displayed?
+        puts "Opening 'Your documents'..."
+        link.click
+        sleep(2)
+      end
     rescue Selenium::WebDriver::Error::NoSuchElementError
       # Fall back to the known URL if the card is missing
       @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
       sleep(2)
     end
+
+    wait_for_on_demand_return
   end
 
   def open_gp_test_results_if_needed
@@ -2147,15 +2163,17 @@ class NHSRecordsDownloader
     # results and hospital (PKB) results
     begin
       link = @driver.find_element(css: "a[href*='#{target}']")
-      return unless link.displayed?
-
-      puts "Opening GP ordered test results..."
-      link.click
-      sleep(2)
+      if link.displayed?
+        puts "Opening GP ordered test results..."
+        link.click
+        sleep(2)
+      end
     rescue Selenium::WebDriver::Error::NoSuchElementError
       @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
       sleep(2)
     end
+
+    wait_for_on_demand_return
   end
 
   def page_title_text
