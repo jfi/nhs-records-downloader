@@ -21,6 +21,15 @@ def setup_env_file
     setup_manual_config(env_content)
   end
   
+  # Download location
+  print "\nWhere should downloads be saved? (leave blank for ./nhs_downloads): "
+  output_dir = gets.chomp.strip
+  
+  unless output_dir.empty?
+    env_content << "# Download location"
+    env_content << "NHS_OUTPUT_DIR=#{File.expand_path(output_dir)}"
+  end
+  
   # NHS Number
   nhs_number = nil
   loop do
@@ -54,6 +63,10 @@ def setup_env_file
   end
 end
 
+def account_shorthand(url)
+  url.to_s.split('.').first
+end
+
 def setup_1password_config(env_content)
   # Check if 1Password CLI is installed
   stdout, stderr, status = Open3.capture3('op', '--version')
@@ -64,6 +77,9 @@ def setup_1password_config(env_content)
   end
   
   # Check for multiple accounts
+  accounts = []
+  selected_account = nil
+  
   stdout, stderr, status = Open3.capture3('op', 'account', 'list')
   if status.success?
     accounts = stdout.lines.drop(1).map do |line|
@@ -86,23 +102,27 @@ def setup_1password_config(env_content)
       end
       
       selected_account = accounts[choice - 1]
-      env_content << "# 1Password Account"
-      env_content << "ONEPASSWORD_ACCOUNT=#{selected_account[:url]}"
-      
-      puts "\n✅ Selected account: #{selected_account[:email]}"
+      puts "\n✅ Selected account: #{selected_account[:email]} (#{selected_account[:url]})"
     elsif accounts.length == 1
       # Single account, use it automatically
-      env_content << "# 1Password Account"
-      env_content << "ONEPASSWORD_ACCOUNT=#{accounts.first[:url]}"
+      selected_account = accounts.first
     end
   end
   
-  # Check if signed in
-  account_flag = accounts && accounts.length > 0 ? "--account #{accounts.first[:url]}" : ""
-  stdout, stderr, status = Open3.capture3("op whoami #{account_flag}")
+  if selected_account
+    env_content << "# 1Password Account"
+    env_content << "ONEPASSWORD_ACCOUNT=#{selected_account[:url]}"
+  end
+  
+  # Always target the selected account, not the CLI's default
+  account_args = selected_account ? ['--account', account_shorthand(selected_account[:url])] : []
+  
+  # Check if signed in to that account
+  stdout, stderr, status = Open3.capture3('op', 'whoami', *account_args)
   unless status.success?
     puts "\n⚠️  You need to sign in to 1Password CLI first"
-    puts "Run: eval $(op signin#{account_flag.empty? ? '' : ' ' + account_flag})"
+    signin_args = account_args.empty? ? '' : " #{account_args.join(' ')}"
+    puts "Run: eval $(op signin#{signin_args})"
     exit 1
   end
   
@@ -110,24 +130,21 @@ def setup_1password_config(env_content)
   item_name = gets.chomp
   
   # Verify the item exists and get its details
-  stdout, stderr, status = Open3.capture3('op', 'item', 'get', item_name, '--format=json')
+  stdout, stderr, status = Open3.capture3('op', 'item', 'get', item_name, '--format=json', *account_args)
   
   if status.success?
     item = JSON.parse(stdout)
     puts "\n✅ Found 1Password item: #{item['title']}"
     puts "   ID: #{item['id']}"
     
-    # Check fields to verify we have username/email and password
-    email_field = nil
-    password_field = nil
-    
-    item['fields'].each do |field|
-      if field['value'] && field['value'].include?('@')
-        email_field = field
-      elsif field['type'] == 'CONCEALED' || field['label']&.downcase == 'password'
-        password_field = field
-      end
-    end
+    # Check fields to verify we have username/email and password.
+    # Prefer the designated purpose fields so we don't pick up an OTP secret.
+    fields = item['fields']
+    email_field = fields.find { |f| f['purpose'] == 'USERNAME' && f['value'] } ||
+                  fields.find { |f| f['value'].to_s.include?('@') }
+    password_field = fields.find { |f| f['purpose'] == 'PASSWORD' && f['value'] } ||
+                     fields.find { |f| f['label'].to_s.downcase == 'password' && f['value'] } ||
+                     fields.find { |f| f['type'] == 'CONCEALED' && f['value'] }
     
     if email_field
       puts "   Email: #{email_field['value']}"

@@ -13,14 +13,25 @@ require 'digest'
 require 'optparse'
 
 class NHSRecordsDownloader
+  # How long to wait for a human to complete a passkey prompt
+  PASSKEY_WAIT_SECONDS = 180
+
   def initialize(options = {})
     @options = options
-    @download_dir = File.join(Dir.pwd, 'nhs_downloads')
+    @download_dir = resolve_output_dir(options)
+    puts "Output directory: #{@download_dir}"
     @use_1password = check_1password_available
     setup_download_directory
     check_rate_limit_lock
     load_download_history
     setup_driver
+  end
+
+  def resolve_output_dir(options)
+    configured = options[:output_dir] || ENV['NHS_OUTPUT_DIR'] || ENV['NHS_DOCUMENTS_DIR']
+    configured = configured.to_s.strip
+    configured = File.join(Dir.pwd, 'nhs_downloads') if configured.empty?
+    File.expand_path(configured)
   end
 
   def check_1password_available
@@ -184,6 +195,43 @@ class NHSRecordsDownloader
     key = generate_document_key(document_id, document_title, document_date)
     @download_history.key?(key)
   end
+
+  # Index files that already exist in the output directory. Filenames are
+  # YYYY-MM-DD_doctype_<random>.<ext>, so a date + document type pair tells us
+  # the document is already there even when there is no download history (for
+  # example when pointing at an existing archive of documents).
+  def index_existing_documents
+    @existing_document_files = Hash.new(0)
+    known_files = @download_history.values.map { |entry| entry['filename'] || entry[:filename] }.compact
+
+    Dir.glob(File.join(@download_dir, '*')).each do |path|
+      next unless File.file?(path)
+      next if known_files.include?(File.basename(path))
+
+      match = File.basename(path).match(/\A(\d{4}-\d{2}-\d{2})_(.+)_([0-9a-f]{8})\.[a-z0-9]+\z/i)
+      next unless match
+
+      @existing_document_files["#{match[1]}|#{match[2].downcase}"] += 1
+    end
+
+    total = @existing_document_files.values.sum
+    puts "✓ Found #{total} existing document(s) in output directory" if total > 0
+  end
+
+  def existing_document_file?(title_text, doc_date)
+    return false unless @existing_document_files
+
+    doc_type = title_text.to_s.split.first.to_s.downcase
+    return false if doc_type.empty?
+
+    key = "#{parse_date_to_filename(doc_date)}|#{doc_type}"
+    return false unless @existing_document_files[key] > 0
+
+    # Consume the match so duplicate documents on the same day are not all
+    # skipped by a single existing file
+    @existing_document_files[key] -= 1
+    true
+  end
   
   def record_document_download(document_id, document_title, document_date, filename)
     key = generate_document_key(document_id, document_title, document_date)
@@ -230,8 +278,9 @@ class NHSRecordsDownloader
     # Additional arguments to disable Chrome features
     options.add_argument('--disable-save-password-bubble')
     options.add_argument('--disable-autofill-keyboard-accessory-view')
-    options.add_argument('--disable-features=WebAuthn')
     options.add_argument('--disable-web-security')
+    
+    # Note: WebAuthn is deliberately left enabled so passkey login works
     
     # Use incognito mode to avoid saved passwords
     options.add_argument('--incognito')
@@ -304,16 +353,19 @@ class NHSRecordsDownloader
       puts "Trying alternate route..."
     end
     
-    # Click Continue to NHS login button
+    # The 'Access your NHS account' page now sits between the homepage and
+    # NHS login, with a Continue button that starts the auth redirect
     begin
-      continue_button = @wait.until { @driver.find_element(css: 'a.nhsuk-button--login[href*="auth/redirect"]') }
-      puts "Clicking 'Continue to NHS login' button..."
-      continue_button.click
+      continue_link = @wait.until do
+        @driver.find_element(css: 'a.nhsuk-button[href*="auth/redirect"], a[href*="auth/redirect"]')
+      end
+      puts "Clicking 'Continue' button on the Access your NHS account page..."
+      continue_link.click
       sleep(2)
     rescue
       # If we can't find the button, navigate directly
       puts "Navigating directly to login page..."
-      @driver.get('https://www.nhs.uk/auth/redirect?target=https://www.nhsapp.service.nhs.uk/patient')
+      @driver.get('https://www.nhs.uk/auth/redirect?referrer=nhsuk-patient')
       sleep(2)
     end
     
@@ -341,8 +393,9 @@ class NHSRecordsDownloader
     
     # Now we should be on the email entry page
     puts "Waiting for email entry page..."
-    puts "⚠️  If Chrome shows a passkey popup, please click 'Cancel' manually"
-    puts "Waiting up to 60 seconds for passkey popup to be cancelled..."
+    puts "⚠️  If Chrome offers a saved passkey here, click 'Cancel' to use your password."
+    puts "   The script pauses for a passkey prompt later if NHS login asks for one."
+    puts "Waiting up to 60 seconds for the email field..."
     
     # Wait for up to 60 seconds for the email field to become available
     email_field = nil
@@ -471,11 +524,10 @@ class NHSRecordsDownloader
       puts "Final URL: #{@driver.current_url}"
     end
     
-    # Check if MFA is required
-    if page_has_element?(:id, 'otp-input') || page_has_element?(:css, "input[data-qa='otp-input']")
-      handle_mfa
-    else
-      puts "No MFA required, continuing..."
+    # Passkeys and MFA can appear in either order after the password
+    unless complete_authentication(password)
+      puts "\n❌ Login did not complete. The browser is still on: #{@driver.current_url}"
+      exit 1
     end
     
     # After all authentication steps, verify login success
@@ -677,6 +729,124 @@ class NHSRecordsDownloader
     end
   end
 
+  def passkey_page?
+    return false unless @driver
+
+    url = @driver.current_url
+    # The failure page is handled separately by handle_passkey_prompts
+    return false if url.include?('passkey-login-failed')
+    return true if url.include?('use-your-passkey')
+
+    @driver.title.to_s.downcase.include?('passkey')
+  rescue Selenium::WebDriver::Error::WebDriverError
+    false
+  end
+
+  # NHS login can ask for a passkey after the password instead of, or as well
+  # as, an MFA code. The browser prompt needs a human, so pause here until the
+  # page moves on.
+  def wait_for_passkey_completion(timeout = PASSKEY_WAIT_SECONDS)
+    return true unless passkey_page?
+
+    @passkey_seen = true
+
+    puts "\n" + ("=" * 60)
+    puts "🔑 Passkey required"
+    puts "=" * 60
+    puts "The NHS login page is asking you to use a passkey."
+    puts "Finish the passkey prompt in the Chrome window"
+    puts "(Touch ID, Windows Hello, your phone or a security key)."
+    puts "If the page has a Continue button, click it to start the prompt."
+    puts "Choose 'use your password instead' if you'd rather not use a passkey."
+    puts "\nWaiting up to #{timeout} seconds for you to finish..."
+    STDOUT.flush
+
+    start_time = Time.now
+    next_update = [30, timeout].min
+
+    while Time.now - start_time < timeout
+      unless passkey_page?
+        puts "\n✓ Passkey step completed after #{(Time.now - start_time).round} seconds"
+        return true
+      end
+
+      elapsed = Time.now - start_time
+      if elapsed >= next_update
+        remaining = (timeout - elapsed).round
+        puts "Still waiting for the passkey step (#{remaining} seconds left)..."
+        STDOUT.flush
+        next_update += 30
+      end
+
+      sleep(1)
+    end
+
+    puts "\n⚠️  Timed out waiting for the passkey step"
+    puts "Current URL: #{@driver.current_url}"
+    false
+  end
+
+  def authentication_state
+    return :passkey if passkey_page?
+
+    if page_has_element?(:id, 'otp-input') || page_has_element?(:css, "input[data-qa='otp-input']")
+      return :mfa
+    end
+
+    if page_has_element?(:id, 'password-input') || page_has_element?(:id, 'password')
+      return :password
+    end
+
+    :done
+  end
+
+  def complete_authentication(password)
+    password_retry_used = false
+    mfa_prompts = 0
+    stuck_polls = 0
+    deadline = Time.now + 600
+
+    while Time.now < deadline
+      case authentication_state
+      when :passkey
+        return false unless wait_for_passkey_completion
+        stuck_polls = 0
+      when :mfa
+        if mfa_prompts >= 2
+          puts "⚠️  MFA still required after #{mfa_prompts} attempts"
+          return false
+        end
+        mfa_prompts += 1
+        handle_mfa
+        stuck_polls = 0
+      when :password
+        if !@passkey_seen
+          # The password form is still on screen right after submission.
+          # Wait for the page to move on rather than submitting it twice.
+          stuck_polls += 1
+          if stuck_polls > 15
+            puts "⚠️  Still on the password page after submitting it"
+            return false
+          end
+        else
+          # The user chose to use their password instead of a passkey
+          return false if password_retry_used
+
+          password_retry_used = true
+          puts "Password page detected, entering password again..."
+          enter_password(password)
+          stuck_polls = 0
+        end
+      else
+        return true
+      end
+
+      sleep(1)
+    end
+
+    false
+  end
+
   def enter_password(password)
     puts "Entering password..."
     
@@ -827,12 +997,13 @@ class NHSRecordsDownloader
     end
     
     # Check if we're on the "Access your NHS services" page
-    max_attempts = 3
+    # (allow time for the redirects after a passkey/MFA step to settle)
+    deadline = Time.now + 30
     attempt = 0
     
-    while attempt < max_attempts
+    while Time.now < deadline
       attempt += 1
-      puts "Login verification attempt #{attempt}"
+      puts "Login verification attempt #{attempt}" if attempt <= 3
       
       # Check current state
       current_url = @driver.current_url
@@ -842,6 +1013,8 @@ class NHSRecordsDownloader
       if current_url.include?('/error') || @driver.title.include?('Something went wrong')
         raise "Login failed - reached error page"
       end
+      
+      break if current_url.include?('nhsapp.service.nhs.uk/patient') || current_url.include?('nhsapp.service.nhs.uk/home')
       
       # Check for "Access your NHS services" page
       if page_source.include?("Access your NHS services")
@@ -867,11 +1040,6 @@ class NHSRecordsDownloader
       
       # Wait a moment for page to settle
       sleep(2)
-      
-      # Check if we're now on the patient page
-      if current_url.include?('nhsapp.service.nhs.uk/patient') || current_url.include?('nhsapp.service.nhs.uk/home')
-        break
-      end
     end
     
     # Clean up URL if it has authentication parameters
@@ -1757,6 +1925,7 @@ class NHSRecordsDownloader
   
   def download_documents
     puts "Downloading documents..."
+    index_existing_documents
     
     begin
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -1812,6 +1981,12 @@ class NHSRecordsDownloader
           # Check if already downloaded
           if document_already_downloaded?(doc_id, title_text, doc_date)
             puts "\n#{index + 1}. Skipping (already downloaded): #{title_text}"
+            next
+          end
+          
+          # Check if the document is already in the output directory
+          if existing_document_file?(title_text, doc_date)
+            puts "\n#{index + 1}. Skipping (already in output directory): #{title_text}"
             next
           end
           
@@ -2271,6 +2446,10 @@ if __FILE__ == $0
       options[:skip_details] = true
     end
     
+    opts.on("-o", "--output-dir PATH", "Save downloads here (default: ./nhs_downloads, or $NHS_OUTPUT_DIR)") do |path|
+      options[:output_dir] = path
+    end
+    
     opts.on("--test-login", "Test login only (no downloads)") do
       options[:test_login] = true
     end
@@ -2283,6 +2462,7 @@ if __FILE__ == $0
       puts "  #{$0} -s test            # Download only test results"
       puts "  #{$0} -s docs,consult    # Download documents and consultations"
       puts "  #{$0} -s test -v         # Download test results with verbose output"
+      puts "  #{$0} -o ~/Documents/Medical  # Save downloads to an existing folder"
       puts "\nAvailable sections:"
       puts "  documents    - GP documents and letters"
       puts "  consultations - Consultations and events"
