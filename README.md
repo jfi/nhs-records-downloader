@@ -102,6 +102,7 @@ Options:
       --skip-details        Skip downloading individual test result details (faster)
       --test-login          Test login only (no downloads)
       --dump-links          Log in, print the page links and exit (debugging)
+      --dump-dom            Log in, print the page structure and exit (debugging)
   -h, --help               Show help message
 ```
 
@@ -199,6 +200,7 @@ The script will:
 - **"Could not find 1Password item"**: Ensure your NHS login item exists in 1Password
 - **"Passkey required"**: Finish the passkey prompt in the Chrome window (Touch ID, Windows Hello, phone or security key) and the script continues on its own. It waits 3 minutes before giving up; choosing "use your password instead" on that page also works.
 - **"Could not find ... link"**: The NHS App occasionally redesigns its home page. Run `./nhs_records_downloader.rb --dump-links` to print the links after login so the selectors can be updated.
+- **A section downloads 0 records**: Run `./nhs_records_downloader.rb --dump-dom` to print the page structure for Documents and Test results (tags, classes and `data-qa` attributes only, no page text), then the selectors can be updated.
 - **Login fails**: Check your credentials and try `./nhs_records_downloader.rb --test-login` to debug
 
 ## Features

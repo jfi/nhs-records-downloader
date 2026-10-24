@@ -1318,6 +1318,36 @@ class NHSRecordsDownloader
     end
   end
 
+  def dump_page_structure
+    script = <<~'JS'
+      var root = document.querySelector('main') || document.body;
+      var out = [];
+      (function walk(el, depth) {
+        if (out.length > 800) return;
+        var attrs = [];
+        if (el.id) attrs.push('#' + el.id);
+        if (typeof el.className === 'string' && el.className.trim()) {
+          attrs.push('.' + el.className.trim().split(/\s+/).slice(0, 4).join('.'));
+        }
+        ['data-qa', 'data-purpose', 'role', 'type', 'name'].forEach(function (a) {
+          var v = el.getAttribute(a);
+          if (v) attrs.push('[' + a + '=' + v + ']');
+        });
+        if (el.tagName === 'A') {
+          var href = el.getAttribute('href');
+          if (href) attrs.push('[href=' + href + ']');
+        }
+        var text = el.children.length === 0 ? (el.textContent || '').trim() : '';
+        out.push(new Array(depth + 1).join('  ') + el.tagName.toLowerCase() + attrs.join('') + (text ? ' (' + text.length + ' chars)' : ''));
+        Array.prototype.forEach.call(el.children, function (child) { walk(child, depth + 1); });
+      })(root, 0);
+      return out.join('\n');
+    JS
+
+    puts "\nPage structure for #{@driver.current_url}:"
+    puts @driver.execute_script(script)
+  end
+
   def download_records
     puts "Starting record downloads..."
     
@@ -1447,7 +1477,7 @@ class NHSRecordsDownloader
       
       # Check for "View all test results" link
       begin
-        view_all_link = @driver.find_element(css: "div#view-older-results a")
+        view_all_link = find_view_older_link
         if view_all_link && view_all_link.displayed?
           puts "\nFound 'View all test results' link - clicking to access other years..."
           view_all_link.click
@@ -1475,6 +1505,60 @@ class NHSRecordsDownloader
     end
   end
   
+  def test_result_link(card)
+    card.find_element(css: 'a.nhsapp-card__link')
+  rescue Selenium::WebDriver::Error::NoSuchElementError
+    begin
+      card.find_element(css: 'a')
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      card
+    end
+  end
+
+  def test_result_name(card)
+    card.find_element(css: "span[data-qa='test-result-name']").text.strip
+  rescue Selenium::WebDriver::Error::NoSuchElementError
+    test_result_link(card).text.strip
+  end
+
+  def find_view_older_link
+    selectors = [
+      'div#view-older-results a',
+      'a#view-older-results',
+      '[data-purpose="view-older-results"] a',
+      '[data-purpose="view-older-results"]',
+      '[data-qa="view-older-results"]'
+    ]
+
+    selectors.each do |css|
+      begin
+        element = @driver.find_element(css: css)
+        return element if element.displayed?
+      rescue Selenium::WebDriver::Error::NoSuchElementError
+        # Try the next selector
+      end
+    end
+
+    # Redesigned pages label the same link with visible text
+    @driver.find_elements(css: 'a, button').find do |element|
+      element.displayed? && element.text.to_s.match?(/view (all|older)/i)
+    end
+  end
+
+  def year_link_for(year)
+    begin
+      element = @driver.find_element(css: "[data-qa='nhs-card-link-historic-years-#{year}']")
+      return element if element.tag_name == 'a'
+
+      nested = element.find_elements(css: 'a').first
+      return nested || element
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      # Fall back to the older layout below
+    end
+
+    @driver.find_element(xpath: "//a[text()='#{year}']")
+  end
+
   def extract_test_results_from_page
     results = []
     wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -1500,7 +1584,7 @@ class NHSRecordsDownloader
               month_heading = month_group.find_element(css: "h3[data-purpose='record-group-header']").text rescue "Unknown Month"
               
               # Find all test result cards in this month
-              test_cards = month_group.find_elements(css: "li[data-qa='test-results-card']")
+              test_cards = month_group.find_elements(css: "[data-qa='test-result-card']")
               puts "Found #{test_cards.length} test results in #{month_heading}"
               
               # Extract all test info before clicking any (to avoid stale elements)
@@ -1508,7 +1592,7 @@ class NHSRecordsDownloader
               test_cards.each_with_index do |card, card_index|
                 begin
                   # Extract test name and URL
-                  link = card.find_element(css: "a")
+                  link = test_result_link(card)
                   test_url = link.attribute("href")
                   
                   # Extract test name from span
@@ -1544,10 +1628,10 @@ class NHSRecordsDownloader
                     current_month_group = current_month_groups[group_index]
                     
                     if current_month_group
-                      current_cards = current_month_group.find_elements(css: "li[data-qa='test-results-card']")
+                      current_cards = current_month_group.find_elements(css: "[data-qa='test-result-card']")
                       if test[:index] < current_cards.length
                         card = current_cards[test[:index]]
-                        link = card.find_element(css: "a")
+                        link = test_result_link(card)
                         
                         puts "Processing: #{test[:name]} - #{test[:date]}"
                         link.click
@@ -1598,7 +1682,7 @@ class NHSRecordsDownloader
         else
           # Fallback: look for test result cards directly without groups
           puts "No month groups found, looking for individual cards..."
-          cards = @driver.find_elements(css: "li.nhsapp-card[data-qa='test-result-card']")
+          cards = @driver.find_elements(css: "[data-qa='test-result-card']")
           
           if cards.empty?
             puts "No test result cards found on this page"
@@ -1611,8 +1695,8 @@ class NHSRecordsDownloader
           cards.each_with_index do |card, index|
             begin
               # Extract test name
-              link = card.find_element(css: "a.nhsapp-card__link")
-              test_name = link.text.strip
+              link = test_result_link(card)
+              test_name = test_result_name(card)
               test_url = link.attribute("href")
               
               # Extract date
@@ -1647,7 +1731,7 @@ class NHSRecordsDownloader
               }
               
               # Re-find cards to avoid stale references
-              cards = @driver.find_elements(css: "li.nhsapp-card[data-qa='test-result-card']")
+              cards = @driver.find_elements(css: "[data-qa='test-result-card']")
               
             rescue => e
               puts "Error processing test result #{index + 1}: #{e.message}"
@@ -1662,10 +1746,10 @@ class NHSRecordsDownloader
         groups.each_with_index do |group, group_index|
           begin
             # Extract month/year from group heading
-            month_heading = group.find_element(css: "h2[data-qa='test-results-group-heading']").text
+            month_heading = group.find_element(css: "[data-qa='test-results-group-heading']").text
             
             # Find all test result cards in this group
-            cards = group.find_elements(css: "li.nhsapp-card[data-qa='test-result-card']")
+            cards = group.find_elements(css: "[data-qa='test-result-card']")
             puts "Found #{cards.length} test results in #{month_heading}"
             
             # Extract all test info before clicking any (to avoid stale elements)
@@ -1673,8 +1757,8 @@ class NHSRecordsDownloader
             cards.each_with_index do |card, card_index|
               begin
                 # Extract test name
-                link = card.find_element(css: "a.nhsapp-card__link")
-                test_name = link.text.strip
+                link = test_result_link(card)
+                test_name = test_result_name(card)
                 test_url = link.attribute("href")
                 
                 # Extract date
@@ -1705,11 +1789,11 @@ class NHSRecordsDownloader
                   current_groups = @driver.find_elements(css: "section[data-qa='test-results-group']")
                   if group_index < current_groups.length
                     current_group = current_groups[group_index]
-                    current_cards = current_group.find_elements(css: "li.nhsapp-card[data-qa='test-result-card']")
+                    current_cards = current_group.find_elements(css: "[data-qa='test-result-card']")
                     
                     if test[:index] < current_cards.length
                       card = current_cards[test[:index]]
-                      link = card.find_element(css: "a.nhsapp-card__link")
+                      link = test_result_link(card)
                       
                       puts "Processing: #{test[:name]} - #{test[:date]}"
                       link.click
@@ -1813,24 +1897,30 @@ class NHSRecordsDownloader
   
   def process_test_results_by_year(all_test_results)
     begin
-      # Find year links on the year selection page
-      year_links = @driver.find_elements(css: "a.nhsapp-card__link")
+      # Find year links on the year selection page. Current pages use
+      # nhs-card-link-historic-years-<year>, older ones use card links.
       available_years = []
-      
-      year_links.each do |link|
-        if link.text.match(/^\d{4}$/)
-          available_years << link.text
+      @driver.find_elements(css: "[data-qa^='nhs-card-link-historic-years-']").each do |link|
+        text = link.text.to_s.strip
+        available_years << text if text.match(/^\d{4}$/)
+      end
+
+      if available_years.empty?
+        @driver.find_elements(css: 'a.nhsapp-card__link').each do |link|
+          text = link.text.to_s.strip
+          available_years << text if text.match(/^\d{4}$/)
         end
       end
-      
+
+      available_years = available_years.uniq
       puts "Found test results for years: #{available_years.join(', ')}"
       
       # Process each year
       available_years.each do |year|
         puts "\nProcessing year #{year}..."
         
-        # Click on the year
-        year_link = @driver.find_element(xpath: "//a[text()='#{year}']")
+        # Click on the year (re-find it each time, the page reloads)
+        year_link = year_link_for(year)
         year_link.click
         sleep(2)
         
@@ -2016,6 +2106,23 @@ class NHSRecordsDownloader
     end
   end
   
+  def page_title_text
+    element = @driver.find_element(css: "[data-qa='template-page-title'], div[data-qa='beta-template-page-title']")
+    text = element.text.to_s.strip
+    return text unless text.empty?
+
+    element.find_element(css: 'h1').text.to_s.strip
+  rescue Selenium::WebDriver::Error::NoSuchElementError
+    ''
+  end
+
+  def document_item_title(item)
+    element = item.find_element(css: '[aria-label]')
+    element.attribute('aria-label').to_s.strip
+  rescue Selenium::WebDriver::Error::NoSuchElementError
+    item.text.to_s.strip
+  end
+
   def download_documents
     puts "Downloading documents..."
     index_existing_documents
@@ -2032,8 +2139,10 @@ class NHSRecordsDownloader
       loop do
         # Find all document items in the current page
         begin
-          doc_container = wait.until { @driver.find_element(css: "div.nhsuk-grid-column-full ul") }
-          doc_items = doc_container.find_elements(css: "li.MenuItem_listMenuItem_iXt37")
+          # The list container changed in the redesign, so find the items
+          # themselves rather than depending on the surrounding div/ul
+          wait.until { @driver.find_elements(css: "li[class*='listMenuItem']").any? }
+          doc_items = @driver.find_elements(css: "li[class*='listMenuItem']")
         rescue => e
           puts "Could not find document list: #{e.message}"
           break
@@ -2049,8 +2158,7 @@ class NHSRecordsDownloader
         doc_items.each_with_index do |item, index|
         begin
           # Re-find elements to avoid stale references
-          doc_container = @driver.find_element(css: "div.nhsuk-grid-column-full ul")
-          current_items = doc_container.find_elements(css: "li.MenuItem_listMenuItem_iXt37")
+          current_items = @driver.find_elements(css: "li[class*='listMenuItem']")
           
           if index >= current_items.length
             puts "Document list changed, skipping remaining items"
@@ -2060,8 +2168,7 @@ class NHSRecordsDownloader
           current_item = current_items[index]
           
           # Extract title/date from the item
-          title_span = current_item.find_element(css: "span[aria-label]")
-          title_text = title_span.attribute("aria-label")
+          title_text = document_item_title(current_item)
           
           # Extract document ID from link if available
           link = current_item.find_element(css: "a")
@@ -2110,14 +2217,14 @@ class NHSRecordsDownloader
           
           # Wait for page to load
           begin
-            wait.until { @driver.find_element(css: "div[data-qa='beta-template-page-title']") }
+            wait.until { @driver.find_element(css: "[data-qa='template-page-title'], div[data-qa='beta-template-page-title']") }
           rescue
             puts "Page load timeout, continuing anyway"
           end
           sleep(1)
           
           # Check if document is unavailable
-          page_title = @driver.find_element(css: "div[data-qa='beta-template-page-title'] h1").text rescue ""
+          page_title = page_title_text
           if page_title.include?("is not available through the NHS App")
             handle_unavailable_document(title_text, skipped_documents)
           else
@@ -2200,8 +2307,8 @@ class NHSRecordsDownloader
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
       
       # Extract document type and date from page title
-      page_title = wait.until { @driver.find_element(css: "div[data-qa='beta-template-page-title'] h1") }
-      full_title = page_title.text
+      wait.until { @driver.find_element(css: "[data-qa='template-page-title'], div[data-qa='beta-template-page-title']") }
+      full_title = page_title_text
       
       # Parse date from title (e.g., "Letter added on 21 July 2025")
       date_match = full_title.match(/(\d{1,2}\s+\w+\s+\d{4})/)
@@ -2216,16 +2323,24 @@ class NHSRecordsDownloader
       doc_type = full_title.split.first || "Document"
       
       # Look for action menu
-      action_menu = wait.until { @driver.find_element(css: "ul[data-sid='action-list-menu']") }
+      action_menu = wait.until do
+        @driver.find_element(css: "[data-qa='action-list-menu'], ul[data-sid='action-list-menu']")
+      end
       
       # Check for download button
       begin
         download_btn = action_menu.find_element(css: "a#btn_downloadDocument")
         
-        # Get file extension from the paragraph that follows within the parent div
-        parent_div = download_btn.find_element(xpath: "..")
-        file_type_elem = parent_div.find_element(css: "p")
-        file_extension = file_type_elem.text.gsub(/[()]/, '').downcase
+        # Get the file type from the nearby label. Default to PDF for
+        # documents, and tolerate layout changes around the button.
+        file_extension = 'pdf'
+        begin
+          parent_div = download_btn.find_element(xpath: "..")
+          file_type_text = parent_div.find_element(css: "p").text.downcase
+          file_extension = %w[pdf png jpeg jpg gif tiff tif].find { |ext| file_type_text.include?(ext) } || 'pdf'
+        rescue Selenium::WebDriver::Error::NoSuchElementError
+          # Keep the PDF default
+        end
         
         puts "Found download button for #{file_extension.upcase} file"
         
@@ -2496,6 +2611,25 @@ class NHSRecordsDownloader
     begin
       login
       
+      # If debugging the page layout, dump the DOM structure of the records pages
+      if @options[:dump_dom]
+        %w[documents test-results].each do |section|
+          @driver.get("https://www.nhsapp.service.nhs.uk/patient/#{section}")
+          sleep(3)
+          dump_page_structure
+        end
+
+        puts "\nChecking the old GP health record page..."
+        @driver.get(SECTION_HUB_URL)
+        sleep(3)
+        puts "Landed on: #{@driver.current_url}"
+        dump_page_structure
+
+        puts "\nPress Enter to close the browser..."
+        gets
+        return
+      end
+      
       # If debugging the page layout, dump the links and stop
       if @options[:dump_links]
         dump_page_links
@@ -2558,6 +2692,10 @@ if __FILE__ == $0
     
     opts.on("--dump-links", "Log in, print the links on the page, then exit (for debugging)") do
       options[:dump_links] = true
+    end
+    
+    opts.on("--dump-dom", "Log in, print the page structure of Documents and Test results, then exit (for debugging)") do
+      options[:dump_dom] = true
     end
     
     opts.on("-h", "--help", "Show this help message") do
