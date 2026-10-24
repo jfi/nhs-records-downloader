@@ -167,7 +167,7 @@ The script will:
 - Open a Chrome browser window
 - Navigate to NHS login
 - Enter your credentials automatically (from 1Password or .env)
-- Handle passkey prompts (dismisses them to use password login)
+- Pause when NHS login asks for a passkey so you can complete it (Touch ID, Windows Hello, your phone or a security key), or choose to use your password instead
 - Prompt you to enter MFA code if required
 - Verify your NHS number appears on the page
 - Download records to the output directory (`nhs_downloads/` by default)
@@ -196,11 +196,12 @@ The script will:
 - **"cannot load such file -- selenium-webdriver"**: Run `bundle install` first
 - **"1Password CLI is not signed in"**: Run `eval $(op signin)` in your terminal
 - **"Could not find 1Password item"**: Ensure your NHS login item exists in 1Password
+- **"Passkey required"**: Finish the passkey prompt in the Chrome window (Touch ID, Windows Hello, phone or security key) and the script continues on its own. It waits 3 minutes before giving up; choosing "use your password instead" on that page also works.
 - **Login fails**: Check your credentials and try `./nhs_records_downloader.rb --test-login` to debug
 
 ## Features
 
-- Automatic passkey prompt dismissal
+- Pauses for passkey login when NHS login asks for one
 - MFA code support with manual entry
 - OTP rate limiting protection (automatic 15-minute wait)
 - Duplicate detection - won't re-download files you already have

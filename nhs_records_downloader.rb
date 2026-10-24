@@ -13,6 +13,9 @@ require 'digest'
 require 'optparse'
 
 class NHSRecordsDownloader
+  # How long to wait for a human to complete a passkey prompt
+  PASSKEY_WAIT_SECONDS = 180
+
   def initialize(options = {})
     @options = options
     @download_dir = resolve_output_dir(options)
@@ -275,8 +278,9 @@ class NHSRecordsDownloader
     # Additional arguments to disable Chrome features
     options.add_argument('--disable-save-password-bubble')
     options.add_argument('--disable-autofill-keyboard-accessory-view')
-    options.add_argument('--disable-features=WebAuthn')
     options.add_argument('--disable-web-security')
+    
+    # Note: WebAuthn is deliberately left enabled so passkey login works
     
     # Use incognito mode to avoid saved passwords
     options.add_argument('--incognito')
@@ -389,8 +393,9 @@ class NHSRecordsDownloader
     
     # Now we should be on the email entry page
     puts "Waiting for email entry page..."
-    puts "⚠️  If Chrome shows a passkey popup, please click 'Cancel' manually"
-    puts "Waiting up to 60 seconds for passkey popup to be cancelled..."
+    puts "⚠️  If Chrome offers a saved passkey here, click 'Cancel' to use your password."
+    puts "   The script pauses for a passkey prompt later if NHS login asks for one."
+    puts "Waiting up to 60 seconds for the email field..."
     
     # Wait for up to 60 seconds for the email field to become available
     email_field = nil
@@ -519,11 +524,10 @@ class NHSRecordsDownloader
       puts "Final URL: #{@driver.current_url}"
     end
     
-    # Check if MFA is required
-    if page_has_element?(:id, 'otp-input') || page_has_element?(:css, "input[data-qa='otp-input']")
-      handle_mfa
-    else
-      puts "No MFA required, continuing..."
+    # Passkeys and MFA can appear in either order after the password
+    unless complete_authentication(password)
+      puts "\n❌ Login did not complete. The browser is still on: #{@driver.current_url}"
+      exit 1
     end
     
     # After all authentication steps, verify login success
@@ -725,6 +729,124 @@ class NHSRecordsDownloader
     end
   end
 
+  def passkey_page?
+    return false unless @driver
+
+    url = @driver.current_url
+    # The failure page is handled separately by handle_passkey_prompts
+    return false if url.include?('passkey-login-failed')
+    return true if url.include?('use-your-passkey')
+
+    @driver.title.to_s.downcase.include?('passkey')
+  rescue Selenium::WebDriver::Error::WebDriverError
+    false
+  end
+
+  # NHS login can ask for a passkey after the password instead of, or as well
+  # as, an MFA code. The browser prompt needs a human, so pause here until the
+  # page moves on.
+  def wait_for_passkey_completion(timeout = PASSKEY_WAIT_SECONDS)
+    return true unless passkey_page?
+
+    @passkey_seen = true
+
+    puts "\n" + ("=" * 60)
+    puts "🔑 Passkey required"
+    puts "=" * 60
+    puts "The NHS login page is asking you to use a passkey."
+    puts "Finish the passkey prompt in the Chrome window"
+    puts "(Touch ID, Windows Hello, your phone or a security key)."
+    puts "If the page has a Continue button, click it to start the prompt."
+    puts "Choose 'use your password instead' if you'd rather not use a passkey."
+    puts "\nWaiting up to #{timeout} seconds for you to finish..."
+    STDOUT.flush
+
+    start_time = Time.now
+    next_update = [30, timeout].min
+
+    while Time.now - start_time < timeout
+      unless passkey_page?
+        puts "\n✓ Passkey step completed after #{(Time.now - start_time).round} seconds"
+        return true
+      end
+
+      elapsed = Time.now - start_time
+      if elapsed >= next_update
+        remaining = (timeout - elapsed).round
+        puts "Still waiting for the passkey step (#{remaining} seconds left)..."
+        STDOUT.flush
+        next_update += 30
+      end
+
+      sleep(1)
+    end
+
+    puts "\n⚠️  Timed out waiting for the passkey step"
+    puts "Current URL: #{@driver.current_url}"
+    false
+  end
+
+  def authentication_state
+    return :passkey if passkey_page?
+
+    if page_has_element?(:id, 'otp-input') || page_has_element?(:css, "input[data-qa='otp-input']")
+      return :mfa
+    end
+
+    if page_has_element?(:id, 'password-input') || page_has_element?(:id, 'password')
+      return :password
+    end
+
+    :done
+  end
+
+  def complete_authentication(password)
+    password_retry_used = false
+    mfa_prompts = 0
+    stuck_polls = 0
+    deadline = Time.now + 600
+
+    while Time.now < deadline
+      case authentication_state
+      when :passkey
+        return false unless wait_for_passkey_completion
+        stuck_polls = 0
+      when :mfa
+        if mfa_prompts >= 2
+          puts "⚠️  MFA still required after #{mfa_prompts} attempts"
+          return false
+        end
+        mfa_prompts += 1
+        handle_mfa
+        stuck_polls = 0
+      when :password
+        if !@passkey_seen
+          # The password form is still on screen right after submission.
+          # Wait for the page to move on rather than submitting it twice.
+          stuck_polls += 1
+          if stuck_polls > 15
+            puts "⚠️  Still on the password page after submitting it"
+            return false
+          end
+        else
+          # The user chose to use their password instead of a passkey
+          return false if password_retry_used
+
+          password_retry_used = true
+          puts "Password page detected, entering password again..."
+          enter_password(password)
+          stuck_polls = 0
+        end
+      else
+        return true
+      end
+
+      sleep(1)
+    end
+
+    false
+  end
+
   def enter_password(password)
     puts "Entering password..."
     
@@ -875,12 +997,13 @@ class NHSRecordsDownloader
     end
     
     # Check if we're on the "Access your NHS services" page
-    max_attempts = 3
+    # (allow time for the redirects after a passkey/MFA step to settle)
+    deadline = Time.now + 30
     attempt = 0
     
-    while attempt < max_attempts
+    while Time.now < deadline
       attempt += 1
-      puts "Login verification attempt #{attempt}"
+      puts "Login verification attempt #{attempt}" if attempt <= 3
       
       # Check current state
       current_url = @driver.current_url
@@ -890,6 +1013,8 @@ class NHSRecordsDownloader
       if current_url.include?('/error') || @driver.title.include?('Something went wrong')
         raise "Login failed - reached error page"
       end
+      
+      break if current_url.include?('nhsapp.service.nhs.uk/patient') || current_url.include?('nhsapp.service.nhs.uk/home')
       
       # Check for "Access your NHS services" page
       if page_source.include?("Access your NHS services")
@@ -915,11 +1040,6 @@ class NHSRecordsDownloader
       
       # Wait a moment for page to settle
       sleep(2)
-      
-      # Check if we're now on the patient page
-      if current_url.include?('nhsapp.service.nhs.uk/patient') || current_url.include?('nhsapp.service.nhs.uk/home')
-        break
-      end
     end
     
     # Clean up URL if it has authentication parameters
