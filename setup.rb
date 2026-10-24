@@ -21,6 +21,15 @@ def setup_env_file
     setup_manual_config(env_content)
   end
   
+  # Download location
+  print "\nWhere should downloads be saved? (leave blank for ./nhs_downloads): "
+  output_dir = gets.chomp.strip
+  
+  unless output_dir.empty?
+    env_content << "# Download location"
+    env_content << "NHS_OUTPUT_DIR=#{File.expand_path(output_dir)}"
+  end
+  
   # NHS Number
   nhs_number = nil
   loop do

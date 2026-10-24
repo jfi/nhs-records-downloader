@@ -15,12 +15,20 @@ require 'optparse'
 class NHSRecordsDownloader
   def initialize(options = {})
     @options = options
-    @download_dir = File.join(Dir.pwd, 'nhs_downloads')
+    @download_dir = resolve_output_dir(options)
+    puts "Output directory: #{@download_dir}"
     @use_1password = check_1password_available
     setup_download_directory
     check_rate_limit_lock
     load_download_history
     setup_driver
+  end
+
+  def resolve_output_dir(options)
+    configured = options[:output_dir] || ENV['NHS_OUTPUT_DIR'] || ENV['NHS_DOCUMENTS_DIR']
+    configured = configured.to_s.strip
+    configured = File.join(Dir.pwd, 'nhs_downloads') if configured.empty?
+    File.expand_path(configured)
   end
 
   def check_1password_available
@@ -183,6 +191,43 @@ class NHSRecordsDownloader
     # Create a unique key for this document
     key = generate_document_key(document_id, document_title, document_date)
     @download_history.key?(key)
+  end
+
+  # Index files that already exist in the output directory. Filenames are
+  # YYYY-MM-DD_doctype_<random>.<ext>, so a date + document type pair tells us
+  # the document is already there even when there is no download history (for
+  # example when pointing at an existing archive of documents).
+  def index_existing_documents
+    @existing_document_files = Hash.new(0)
+    known_files = @download_history.values.map { |entry| entry['filename'] || entry[:filename] }.compact
+
+    Dir.glob(File.join(@download_dir, '*')).each do |path|
+      next unless File.file?(path)
+      next if known_files.include?(File.basename(path))
+
+      match = File.basename(path).match(/\A(\d{4}-\d{2}-\d{2})_(.+)_([0-9a-f]{8})\.[a-z0-9]+\z/i)
+      next unless match
+
+      @existing_document_files["#{match[1]}|#{match[2].downcase}"] += 1
+    end
+
+    total = @existing_document_files.values.sum
+    puts "✓ Found #{total} existing document(s) in output directory" if total > 0
+  end
+
+  def existing_document_file?(title_text, doc_date)
+    return false unless @existing_document_files
+
+    doc_type = title_text.to_s.split.first.to_s.downcase
+    return false if doc_type.empty?
+
+    key = "#{parse_date_to_filename(doc_date)}|#{doc_type}"
+    return false unless @existing_document_files[key] > 0
+
+    # Consume the match so duplicate documents on the same day are not all
+    # skipped by a single existing file
+    @existing_document_files[key] -= 1
+    true
   end
   
   def record_document_download(document_id, document_title, document_date, filename)
@@ -1760,6 +1805,7 @@ class NHSRecordsDownloader
   
   def download_documents
     puts "Downloading documents..."
+    index_existing_documents
     
     begin
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -1815,6 +1861,12 @@ class NHSRecordsDownloader
           # Check if already downloaded
           if document_already_downloaded?(doc_id, title_text, doc_date)
             puts "\n#{index + 1}. Skipping (already downloaded): #{title_text}"
+            next
+          end
+          
+          # Check if the document is already in the output directory
+          if existing_document_file?(title_text, doc_date)
+            puts "\n#{index + 1}. Skipping (already in output directory): #{title_text}"
             next
           end
           
@@ -2274,6 +2326,10 @@ if __FILE__ == $0
       options[:skip_details] = true
     end
     
+    opts.on("-o", "--output-dir PATH", "Save downloads here (default: ./nhs_downloads, or $NHS_OUTPUT_DIR)") do |path|
+      options[:output_dir] = path
+    end
+    
     opts.on("--test-login", "Test login only (no downloads)") do
       options[:test_login] = true
     end
@@ -2286,6 +2342,7 @@ if __FILE__ == $0
       puts "  #{$0} -s test            # Download only test results"
       puts "  #{$0} -s docs,consult    # Download documents and consultations"
       puts "  #{$0} -s test -v         # Download test results with verbose output"
+      puts "  #{$0} -o ~/Documents/Medical  # Save downloads to an existing folder"
       puts "\nAvailable sections:"
       puts "  documents    - GP documents and letters"
       puts "  consultations - Consultations and events"

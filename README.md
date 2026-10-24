@@ -35,6 +35,7 @@ A Ruby script to securely download your NHS GP records, documents, and test resu
    This will:
    - Ask if you're using 1Password CLI
    - Configure your login method
+   - Ask where downloads should be saved (default: `./nhs_downloads`)
    - Validate and format your NHS number
    - Create the `.env` file
 
@@ -96,11 +97,15 @@ Run the main script to download all records:
 Options:
   -s, --sections SECTIONS    Comma-separated list of sections to download
                             (documents, consultations, test)
+  -o, --output-dir PATH      Save downloads here instead of ./nhs_downloads
   -v, --verbose             Enable verbose output for debugging
       --skip-details        Skip downloading individual test result details (faster)
       --test-login          Test login only (no downloads)
   -h, --help               Show help message
 ```
+
+You can also set the location in `.env` with `NHS_OUTPUT_DIR=~/Documents/Medical`
+(the `--output-dir` flag takes precedence).
 
 ### Examples
 
@@ -126,12 +131,28 @@ Debug mode with verbose output:
 
 ### Download Location and Formats
 
-All files are downloaded to the `nhs_downloads/` directory in the project folder:
+By default all files are downloaded to the `nhs_downloads/` directory in the
+project folder. Use `-o PATH` or `NHS_OUTPUT_DIR` to save them somewhere else,
+for example an existing records folder:
+
+```bash
+./nhs_records_downloader.rb -o ~/Documents/Medical
+```
+
+Everything, including `download_history.json`, the CSV/JSON exports, the rate
+limit lock and the skipped documents report, is written to that directory, so
+the folder is self-contained.
+
+When the output directory already contains documents from a previous download
+(named `YYYY-MM-DD_doctype_xxxxxxxx.ext`), they are treated as already
+downloaded: a document on the NHS side is skipped if a file with the same date
+and document type is present. Matching is by filename, so files renamed by
+hand or saved under a different scheme will not be recognised.
 
 ```
 nhs-records/
 └── nhs_downloads/
-    ├── documents/           # PDF files and embedded images
+    ├── 2025-07-21_letter_a1b2c3d4.pdf   # Downloaded documents and images
     ├── consultations_and_events.json
     ├── consultations_and_events.csv
     ├── test_results.json
@@ -149,11 +170,11 @@ The script will:
 - Handle passkey prompts (dismisses them to use password login)
 - Prompt you to enter MFA code if required
 - Verify your NHS number appears on the page
-- Download records to `nhs_downloads/`
+- Download records to the output directory (`nhs_downloads/` by default)
 
 #### Documents
 - **Format**: PDF files
-- **Location**: `nhs_downloads/documents/`
+- **Location**: the output directory (documents sit alongside the exports)
 - PDF letters and documents from your GP records
 - Embedded images extracted from documents
 - Creates `skipped_documents_report.txt` for any documents that couldn't be downloaded
@@ -185,7 +206,7 @@ The script will:
 - Duplicate detection - won't re-download files you already have
 - Download history tracking
 - Selective downloading by section (documents, consultations, test results)
-- All files stored locally in a single `nhs_downloads` folder
+- All files stored locally in a single output folder
 - Structured data export (JSON and CSV) for consultations and test results
 - Comprehensive error handling and recovery
 - Summary reports for skipped/failed documents
