@@ -2624,9 +2624,13 @@ class NHSRecordsDownloader
       
       # If debugging the page layout, dump the DOM structure of the records pages
       if @options[:dump_dom]
-        %w[documents test-results].each do |section|
-          @driver.get("https://www.nhsapp.service.nhs.uk/patient/#{section}")
+        {
+          'documents list' => '/patient/documents/your-documents',
+          'test results list' => '/patient/test-results/gp-ordered-test-results'
+        }.each do |label, path|
+          @driver.get("https://www.nhsapp.service.nhs.uk#{path}")
           sleep(3)
+          puts "\n=== #{label} ==="
           dump_page_structure
         end
 
