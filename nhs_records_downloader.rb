@@ -1424,6 +1424,7 @@ class NHSRecordsDownloader
   def download_test_results
     puts "Downloading test results..."
     open_gp_test_results_if_needed
+    handle_sensitive_info_warning('testResults', 5)
     
     begin
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -1621,8 +1622,7 @@ class NHSRecordsDownloader
                         details = extract_individual_test_result
                         
                         # Navigate back
-                        @driver.navigate.back
-                        sleep(2)
+                        go_back('testResults')
                       end
                     end
                   else
@@ -1641,8 +1641,7 @@ class NHSRecordsDownloader
                 rescue => e
                   puts "Error processing test '#{test[:name]}': #{e.message}"
                   # Try to navigate back if we're stuck
-                  @driver.navigate.back rescue nil
-                  sleep(2)
+                  go_back('testResults')
                   
                   # Still add the test with basic info
                   results << {
@@ -1695,8 +1694,7 @@ class NHSRecordsDownloader
                 details = extract_individual_test_result
                 
                 # Navigate back
-                @driver.navigate.back
-                sleep(2)
+                go_back('testResults')
               else
                 puts "Found: #{test_name} - #{test_date} (skipping details)"
               end
@@ -1716,8 +1714,7 @@ class NHSRecordsDownloader
             rescue => e
               puts "Error processing test result #{index + 1}: #{e.message}"
               # Try to navigate back if we're stuck
-              @driver.navigate.back rescue nil
-              sleep(2)
+              go_back('testResults')
             end
           end
         end
@@ -1783,8 +1780,7 @@ class NHSRecordsDownloader
                       details = extract_individual_test_result
                       
                       # Navigate back
-                      @driver.navigate.back
-                      sleep(2)
+                      go_back('testResults')
                     end
                   end
                 else
@@ -1803,8 +1799,7 @@ class NHSRecordsDownloader
               rescue => e
                 puts "Error processing test '#{test[:name]}': #{e.message}"
                 # Try to navigate back if we're stuck
-                @driver.navigate.back rescue nil
-                sleep(2)
+                go_back('testResults')
                 
                 # Still add the test with basic info
                 results << {
@@ -1909,8 +1904,7 @@ class NHSRecordsDownloader
         all_test_results.concat(results)
         
         # Navigate back to year selection
-        @driver.navigate.back
-        sleep(2)
+        go_back('testResults')
       end
       
     rescue => e
@@ -2086,6 +2080,45 @@ class NHSRecordsDownloader
     end
   end
   
+  def go_back(record_type)
+    begin
+      @driver.navigate.back
+    rescue Selenium::WebDriver::Error::WebDriverError
+      # Ignore a failed history navigation
+    end
+    sleep(2)
+    handle_sensitive_info_warning(record_type)
+  end
+
+  def handle_sensitive_info_warning(record_type, timeout = 0)
+    deadline = Time.now + timeout
+    warning = nil
+
+    loop do
+      begin
+        warning = @driver.find_element(css: "[data-qa='sensitive-info-#{record_type}-warning']")
+        break if warning.displayed?
+      rescue Selenium::WebDriver::Error::NoSuchElementError
+        # Warning not shown (yet)
+      end
+
+      break if Time.now >= deadline
+      sleep(0.5)
+    end
+
+    return false unless warning && warning.displayed?
+
+    puts "Accepting the sensitive information warning..."
+    begin
+      button = @driver.find_element(css: "[data-qa='sensitive-info-#{record_type}-warning-continue-button']")
+      button.click
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      warning.find_element(css: 'button, a').click
+    end
+    sleep(2)
+    true
+  end
+
   def open_gp_documents_if_needed
     target = '/patient/documents/your-documents'
     return if @driver.current_url.include?(target)
@@ -2149,6 +2182,7 @@ class NHSRecordsDownloader
   def download_documents
     puts "Downloading documents..."
     open_gp_documents_if_needed
+    handle_sensitive_info_warning('documents', 5)
     index_existing_documents
     documents_url = @driver.current_url
     
@@ -2265,8 +2299,7 @@ class NHSRecordsDownloader
           
           # Navigate back to documents list
           puts "Navigating back to documents list..."
-          @driver.navigate.back
-          sleep(2)
+          go_back('documents')
           
           # Verify we're back on the documents page
           unless @driver.current_url.include?('documents')
@@ -2275,6 +2308,7 @@ class NHSRecordsDownloader
             begin
               @driver.get(documents_url)
               sleep(2)
+              handle_sensitive_info_warning('documents', 5)
             rescue
               puts "Failed to navigate back to documents"
               break
@@ -2289,8 +2323,7 @@ class NHSRecordsDownloader
             details: e.message
           }
           # Try to navigate back if we're stuck
-          @driver.navigate.back rescue nil
-          sleep(2)
+          go_back('documents')
         end
       end
       
