@@ -2087,29 +2087,42 @@ class NHSRecordsDownloader
   end
   
   def open_gp_documents_if_needed
+    target = '/patient/documents/your-documents'
+    return if @driver.current_url.include?(target)
+
     # The Documents tile opens a category page; the GP document list is one
     # level below it on redesigned versions of the app
-    link = @driver.find_element(css: "a[href*='/patient/documents/your-documents']")
-    return unless link.displayed?
+    begin
+      link = @driver.find_element(css: "a[href*='#{target}']")
+      return unless link.displayed?
 
-    puts "Opening 'Your documents'..."
-    link.click
-    sleep(2)
-  rescue Selenium::WebDriver::Error::NoSuchElementError
-    # Already on a document list
+      puts "Opening 'Your documents'..."
+      link.click
+      sleep(2)
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      # Fall back to the known URL if the card is missing
+      @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
+      sleep(2)
+    end
   end
 
   def open_gp_test_results_if_needed
+    target = '/patient/test-results/gp-ordered-test-results'
+    return if @driver.current_url.include?(target)
+
     # Likewise, the Test results tile opens a category page with GP ordered
     # results and hospital (PKB) results
-    link = @driver.find_element(css: "a[href*='/patient/test-results/gp-ordered-test-results']")
-    return unless link.displayed?
+    begin
+      link = @driver.find_element(css: "a[href*='#{target}']")
+      return unless link.displayed?
 
-    puts "Opening GP ordered test results..."
-    link.click
-    sleep(2)
-  rescue Selenium::WebDriver::Error::NoSuchElementError
-    # Already on a test results list
+      puts "Opening GP ordered test results..."
+      link.click
+      sleep(2)
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
+      sleep(2)
+    end
   end
 
   def page_title_text
