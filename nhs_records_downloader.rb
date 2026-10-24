@@ -1257,8 +1257,6 @@ class NHSRecordsDownloader
     end
   end
 
-  SECTION_HUB_URL = 'https://www.nhsapp.service.nhs.uk/patient/health-records/gp-medical-record'
-
   def visible_links
     links = []
     @driver.find_elements(css: 'a').each do |link|
@@ -1389,24 +1387,6 @@ class NHSRecordsDownloader
       begin
         section_link = find_section_link(section)
         
-        # The redesigned home page omits some sections, but they still exist
-        # on the older GP health record page
-        if !section_link && !@driver.current_url.include?('gp-medical-record')
-          puts "Looking for #{section[:name]} on the GP health record page..."
-          begin
-            @driver.get(SECTION_HUB_URL)
-            sleep(2)
-            section_link = find_section_link(section)
-          rescue Selenium::WebDriver::Error::WebDriverError => e
-            puts "Could not open GP health record page: #{e.message}"
-          end
-
-          unless section_link
-            @driver.get(records_url)
-            sleep(1)
-          end
-        end
-        
         if section_link
           puts "Clicking on #{section[:name]} link..."
           @driver.execute_script("arguments[0].scrollIntoView(true);", section_link)
@@ -1429,8 +1409,7 @@ class NHSRecordsDownloader
           @driver.get(records_url)
           sleep(2)
         else
-          puts "❌ Could not find #{section[:name]} link"
-          dump_page_links
+          puts "⚠️  #{section[:name]} is not listed in this version of the NHS App - skipping"
         end
         
       rescue => e
@@ -1444,6 +1423,7 @@ class NHSRecordsDownloader
   
   def download_test_results
     puts "Downloading test results..."
+    open_gp_test_results_if_needed
     
     begin
       wait = Selenium::WebDriver::Wait.new(timeout: 10)
@@ -2106,6 +2086,45 @@ class NHSRecordsDownloader
     end
   end
   
+  def open_gp_documents_if_needed
+    target = '/patient/documents/your-documents'
+    return if @driver.current_url.include?(target)
+
+    # The Documents tile opens a category page; the GP document list is one
+    # level below it on redesigned versions of the app
+    begin
+      link = @driver.find_element(css: "a[href*='#{target}']")
+      return unless link.displayed?
+
+      puts "Opening 'Your documents'..."
+      link.click
+      sleep(2)
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      # Fall back to the known URL if the card is missing
+      @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
+      sleep(2)
+    end
+  end
+
+  def open_gp_test_results_if_needed
+    target = '/patient/test-results/gp-ordered-test-results'
+    return if @driver.current_url.include?(target)
+
+    # Likewise, the Test results tile opens a category page with GP ordered
+    # results and hospital (PKB) results
+    begin
+      link = @driver.find_element(css: "a[href*='#{target}']")
+      return unless link.displayed?
+
+      puts "Opening GP ordered test results..."
+      link.click
+      sleep(2)
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      @driver.get("https://www.nhsapp.service.nhs.uk#{target}")
+      sleep(2)
+    end
+  end
+
   def page_title_text
     element = @driver.find_element(css: "[data-qa='template-page-title'], div[data-qa='beta-template-page-title']")
     text = element.text.to_s.strip
@@ -2117,14 +2136,19 @@ class NHSRecordsDownloader
   end
 
   def document_item_title(item)
-    element = item.find_element(css: '[aria-label]')
-    element.attribute('aria-label').to_s.strip
-  rescue Selenium::WebDriver::Error::NoSuchElementError
+    begin
+      label = item.find_element(css: '[aria-label]').attribute('aria-label').to_s.strip
+      return label unless label.empty?
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      # Fall through to the visible text
+    end
+
     item.text.to_s.strip
   end
 
   def download_documents
     puts "Downloading documents..."
+    open_gp_documents_if_needed
     index_existing_documents
     documents_url = @driver.current_url
     
@@ -2613,17 +2637,15 @@ class NHSRecordsDownloader
       
       # If debugging the page layout, dump the DOM structure of the records pages
       if @options[:dump_dom]
-        %w[documents test-results].each do |section|
-          @driver.get("https://www.nhsapp.service.nhs.uk/patient/#{section}")
+        {
+          'documents list' => '/patient/documents/your-documents',
+          'test results list' => '/patient/test-results/gp-ordered-test-results'
+        }.each do |label, path|
+          @driver.get("https://www.nhsapp.service.nhs.uk#{path}")
           sleep(3)
+          puts "\n=== #{label} ==="
           dump_page_structure
         end
-
-        puts "\nChecking the old GP health record page..."
-        @driver.get(SECTION_HUB_URL)
-        sleep(3)
-        puts "Landed on: #{@driver.current_url}"
-        dump_page_structure
 
         puts "\nPress Enter to close the browser..."
         gets
