@@ -287,20 +287,40 @@ class NHSRecordsDownloader
     
     @driver = Selenium::WebDriver.for :chrome, options: options
     @wait = Selenium::WebDriver::Wait.new(timeout: 30)
+    ensure_download_directory
+  end
 
-    # Chrome was still showing a Save dialog for every document despite
-    # prompt_for_download being false. CDP's download behaviour overrides it.
-    begin
-      @driver.execute_cdp('Browser.setDownloadBehavior',
-                          behavior: 'allow',
-                          downloadPath: @download_dir,
-                          eventsEnabled: true)
-    rescue => e
+  def ensure_download_directory
+    # The window is incognito, which has its own browser context; set the
+    # behaviour for that context as well as the default one.
+    context_id = begin
+      page = @driver.execute_cdp('Target.getTargets')['targetInfos'].find { |t| t['type'] == 'page' }
+      page && page['browserContextId']
+    rescue StandardError
+      nil
+    end
+
+    if context_id
       begin
-        @driver.execute_cdp('Page.setDownloadBehavior', behavior: 'allow', downloadPath: @download_dir)
-      rescue => fallback_error
-        puts "⚠️  Could not set the download directory: #{fallback_error.message}"
+        @driver.execute_cdp('Browser.setDownloadBehavior',
+                            behavior: 'allow',
+                            downloadPath: @download_dir,
+                            browserContextId: context_id,
+                            eventsEnabled: true)
+      rescue StandardError
+        # Fall through to the context-less call
       end
+    end
+
+    @driver.execute_cdp('Browser.setDownloadBehavior',
+                        behavior: 'allow',
+                        downloadPath: @download_dir,
+                        eventsEnabled: true)
+  rescue StandardError
+    begin
+      @driver.execute_cdp('Page.setDownloadBehavior', behavior: 'allow', downloadPath: @download_dir)
+    rescue StandardError
+      nil
     end
   end
 
@@ -2237,6 +2257,18 @@ class NHSRecordsDownloader
     item.text.to_s.strip
   end
 
+  def describe_upload_error(reference)
+    if reference.include?('COM/API/CONVERSATION/PATIENTUPLOAD')
+      'Attachment uploaded in a consultation or message; the NHS App has no file to download'
+    elsif reference.include?('PATIENTUPLOAD')
+      'Patient upload; the NHS App has no file to download'
+    elsif reference.include?('COM/NAV/DOCUMENTS')
+      'GP document reference the NHS App cannot resolve to a file'
+    else
+      'GP system returned a reference instead of a file'
+    end
+  end
+
   def download_documents
     puts "Downloading documents..."
     open_gp_documents_if_needed
@@ -2315,11 +2347,12 @@ class NHSRecordsDownloader
             p_elem = current_item.find_element(css: "p")
             type_text = p_elem.text
             if type_text.include?("COM/API/") || type_text.include?("PATIENTUPLOAD") || type_text.include?("COM/NAV/")
-              puts "\n#{index + 1}. Skipping API error document: #{title_text}"
-              puts "   Reason: Document appears to be an upload error (#{type_text})"
+              reason = describe_upload_error(type_text)
+              puts "\n#{index + 1}. Skipping: #{title_text}"
+              puts "   Reason: #{reason} (#{type_text})"
               skipped_documents << {
                 title: title_text,
-                reason: "API upload error",
+                reason: reason,
                 details: type_text
               }
               next
@@ -2467,6 +2500,7 @@ class NHSRecordsDownloader
         filename = generate_document_filename(formatted_date, doc_type, file_extension)
         
         # Click download
+        ensure_download_directory
         download_btn.click
         
         # Wait for download and rename
@@ -2760,6 +2794,28 @@ class NHSRecordsDownloader
         return
       end
       
+      # If debugging the document page, open the first document and dump it
+      if @options[:dump_document]
+        open_gp_documents_if_needed
+        handle_sensitive_info_warning('documents', 5)
+        wait_for_page_ready(60)
+        items = @driver.find_elements(css: "li[class*='listMenuItem']")
+
+        if items.empty?
+          puts "No documents found on the page"
+        else
+          items.first.find_element(css: 'a').click
+          sleep(3)
+          wait_for_page_ready(60)
+          handle_sensitive_info_warning('documents', 5)
+          dump_page_structure
+        end
+
+        puts "\nPress Enter to close the browser..."
+        gets
+        return
+      end
+      
       # If test login only, stop here
       if @options[:test_login]
         puts "\n✅ Login test completed successfully!"
@@ -2818,6 +2874,10 @@ if __FILE__ == $0
     
     opts.on("--dump-dom", "Log in, print the page structure of Documents and Test results, then exit (for debugging)") do
       options[:dump_dom] = true
+    end
+    
+    opts.on("--dump-document", "Log in, open the first document and print its structure (for debugging)") do
+      options[:dump_document] = true
     end
     
     opts.on("-h", "--help", "Show this help message") do
