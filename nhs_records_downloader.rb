@@ -287,6 +287,21 @@ class NHSRecordsDownloader
     
     @driver = Selenium::WebDriver.for :chrome, options: options
     @wait = Selenium::WebDriver::Wait.new(timeout: 30)
+
+    # Chrome was still showing a Save dialog for every document despite
+    # prompt_for_download being false. CDP's download behaviour overrides it.
+    begin
+      @driver.execute_cdp('Browser.setDownloadBehavior',
+                          behavior: 'allow',
+                          downloadPath: @download_dir,
+                          eventsEnabled: true)
+    rescue => e
+      begin
+        @driver.execute_cdp('Page.setDownloadBehavior', behavior: 'allow', downloadPath: @download_dir)
+      rescue => fallback_error
+        puts "⚠️  Could not set the download directory: #{fallback_error.message}"
+      end
+    end
   end
 
   def login
@@ -2426,7 +2441,9 @@ class NHSRecordsDownloader
         download_btn.click
         
         # Wait for download and rename
-        wait_for_download_and_rename(filename)
+        unless wait_for_download_and_rename(filename)
+          return :failed
+        end
         
         # Record successful download
         record_document_download(doc_id, title_text, doc_date, filename)
@@ -2500,9 +2517,9 @@ class NHSRecordsDownloader
     "#{date}_#{doc_type.downcase}_#{unique_id}.#{extension}"
   end
   
-  def wait_for_download_and_rename(target_filename)
-    # Wait for download to complete
-    download_wait_time = 10
+  def wait_for_download_and_rename(target_filename, timeout = 30)
+    # Wait for download to complete (large PDFs can take a while)
+    download_wait_time = timeout
     check_interval = 0.5
     elapsed = 0
     
@@ -2524,14 +2541,15 @@ class NHSRecordsDownloader
         # Rename file
         FileUtils.mv(old_path, new_path)
         puts "✓ Downloaded and renamed to: #{target_filename}"
-        return
+        return true
       end
       
       sleep(check_interval)
       elapsed += check_interval
     end
     
-    puts "⚠️  Download may have failed or timed out"
+    puts "⚠️  Download may have failed or timed out (nothing arrived in #{@download_dir})"
+    false
   end
   
   def handle_unavailable_document(title_text, skipped_documents)
