@@ -2148,6 +2148,30 @@ class NHSRecordsDownloader
     puts "⚠️  Timed out waiting for the GP record to load"
   end
 
+  def wait_for_page_ready(timeout = 60)
+    deadline = Time.now + timeout
+
+    while Time.now < deadline
+      spinner_visible = begin
+        @driver.find_element(css: "[data-qa='template-spinner']").displayed?
+      rescue Selenium::WebDriver::Error::NoSuchElementError
+        false
+      end
+
+      heading_visible = begin
+        @driver.find_element(css: "[data-qa='template-page-title']").displayed?
+      rescue Selenium::WebDriver::Error::NoSuchElementError
+        false
+      end
+
+      return if heading_visible && !spinner_visible
+
+      sleep(1)
+    end
+
+    puts "⚠️  Page is still loading after #{timeout} seconds"
+  end
+
   def open_gp_documents_if_needed
     target = '/patient/documents/your-documents'
     return if @driver.current_url.include?(target)
@@ -2168,6 +2192,7 @@ class NHSRecordsDownloader
     end
 
     wait_for_on_demand_return
+    wait_for_page_ready(60)
   end
 
   def open_gp_test_results_if_needed
@@ -2261,10 +2286,13 @@ class NHSRecordsDownloader
           # Extract title/date from the item
           title_text = document_item_title(current_item)
           
-          # Extract document ID from link if available
+          # Extract document ID from the link. The redesigned list has no
+          # href; the stable identifier is on the anchor's id attribute.
           link = current_item.find_element(css: "a")
           doc_url = link.attribute("href")
-          doc_id = doc_url.split('/').last if doc_url
+          doc_id = link.attribute("id")
+          doc_id = nil if doc_id.to_s.strip.empty?
+          doc_id = doc_url.split('/').last if doc_id.nil? && doc_url
           
           # Parse date from title
           date_match = title_text.match(/(\d{1,2}\s+\w+\s+\d{4})/)
@@ -2285,13 +2313,14 @@ class NHSRecordsDownloader
           # Check for API error documents
           begin
             p_elem = current_item.find_element(css: "p")
-            if p_elem.text.include?("COM/API/") || p_elem.text.include?("PATIENTUPLOAD")
+            type_text = p_elem.text
+            if type_text.include?("COM/API/") || type_text.include?("PATIENTUPLOAD") || type_text.include?("COM/NAV/")
               puts "\n#{index + 1}. Skipping API error document: #{title_text}"
-              puts "   Reason: Document appears to be an upload error (#{p_elem.text})"
+              puts "   Reason: Document appears to be an upload error (#{type_text})"
               skipped_documents << {
                 title: title_text,
                 reason: "API upload error",
-                details: p_elem.text
+                details: type_text
               }
               next
             end
@@ -2713,6 +2742,7 @@ class NHSRecordsDownloader
           @driver.get("https://www.nhsapp.service.nhs.uk#{path}")
           sleep(3)
           handle_sensitive_info_warning(record_type, 5)
+          wait_for_page_ready(60)
           puts "\n=== #{label} ==="
           dump_page_structure
         end
